@@ -1,0 +1,3 @@
+FROM alpine
+
+COPY mongodb-controller/mongodb-controller /mongodb-controller

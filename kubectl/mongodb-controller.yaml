@@ -1,0 +1,23 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: mongodb-controller
+  labels:
+    name: mongodb-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: mongodb-controller
+  template:
+    metadata:
+      labels:
+        name: mongodb-controller
+    spec:
+      containers:
+      - name: mongodb-controller
+        image: naemono/mongodb-controller:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - ./mongodb-controller
+        - --v=4
