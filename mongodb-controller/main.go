@@ -3,12 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/naemono/kube-controller-test/common"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -17,6 +17,8 @@ import (
 	"k8s.io/client-go/pkg/api/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+
+	mongodbreplicasetclientset "github.com/naemono/kube-controller-test/pkg/client/clientset/versioned"
 )
 
 // TODO(aaron): make configurable and add MinAvailable
@@ -44,23 +46,30 @@ func main() {
 		glog.Fatalf("Failed to create kubernetes client: %v", err)
 	}
 
+	mclient, err := mongodbreplicasetclientset.NewForConfig(config)
+	if err != nil {
+		glog.Fatalf("Failed to create mongodb client: %v", err)
+	}
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	newMongodbController(client).Run(stopCh)
+	newMongodbController(client, mclient).Run(stopCh)
 }
 
 type mongodbController struct {
-	client     kubernetes.Interface
-	nodeLister lister_v1.NodeLister
-	informer   cache.Controller
-	queue      workqueue.RateLimitingInterface
+	client      kubernetes.Interface
+	mongoClient mongodbreplicasetclientset
+	podLister   lister_v1.PodLister
+	informer    cache.Controller
+	queue       workqueue.RateLimitingInterface
 }
 
-func newMongodbController(client kubernetes.Interface) *mongodbController {
+func newMongodbController(client kubernetes.Interface, mclient mongodbreplicasetclientset.Interface) *mongodbController {
 	rc := &mongodbController{
-		client: client,
-		queue:  workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		client:  client,
+		mclient: mclient,
+		queue:   workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 	}
 
 	indexer, informer := cache.NewIndexerInformer(
@@ -69,14 +78,14 @@ func newMongodbController(client kubernetes.Interface) *mongodbController {
 				// We do not add any selectors because we want to watch all nodes.
 				// This is so we can determine the total count of "unavailable" nodes.
 				// However, this could also be implemented using multiple informers (or better, shared-informers)
-				return client.Core().Nodes().List(lo)
+				return client.Core().Pods("default").List(lo)
 			},
 			WatchFunc: func(lo meta_v1.ListOptions) (watch.Interface, error) {
-				return client.Core().Nodes().Watch(lo)
+				return client.Core().Pods("default").Watch(lo)
 			},
 		},
 		// The types of objects this informer will return
-		&v1.Node{},
+		&v1.Pod{},
 		// The resync period of this object. This will force a re-queue of all cached objects at this interval.
 		// Every object will trigger the `Updatefunc` even if there have been no actual updates triggered.
 		// In some cases you can set this to a very high interval - as you can assume you will see periodic updates in normal operation.
@@ -105,7 +114,7 @@ func newMongodbController(client kubernetes.Interface) *mongodbController {
 
 	rc.informer = informer
 	// NodeLister avoids some boilerplate code (e.g. convert runtime.Object to *v1.node)
-	rc.nodeLister = lister_v1.NewNodeLister(indexer)
+	rc.podLister = lister_v1.NewPodLister(indexer)
 
 	return rc
 }
@@ -126,7 +135,7 @@ func (c *mongodbController) Run(stopCh chan struct{}) {
 	go wait.Until(c.runWorker, time.Second, stopCh)
 
 	<-stopCh
-	glog.Info("Stopping Reboot Controller")
+	glog.Info("Stopping Reboot Cont	roller")
 }
 
 func (c *mongodbController) runWorker() {
@@ -152,17 +161,22 @@ func (c *mongodbController) processNext() bool {
 }
 
 func (c *mongodbController) process(key string) error {
-	node, err := c.nodeLister.Get(key)
+	result := strings.Split(key, "/")
+	if len(result) == 0 {
+		return fmt.Errorf("Couldn't split pod %q", key)
+	}
+	var podName = result[1]
+	pod, err := c.podLister.Pods("default").Get(podName)
 	if err != nil {
-		return fmt.Errorf("failed to retrieve node by key %q: %v", key, err)
+		return fmt.Errorf("failed to retrieve pod by key %q: %v", podName, err)
 	}
 
-	glog.V(4).Infof("Received update of node: %s", node.GetName())
-	if node.Annotations == nil {
-		return nil // If node has no annotations, then it doesn't need a reboot
+	glog.V(4).Infof("Received update of pod: %s", pod.GetName())
+	if pod.Annotations == nil {
+		return nil // If pod has no annotations...
 	}
 
-	if _, ok := node.Annotations[common.RebootNeededAnnotation]; !ok {
+	if _, ok := pod.Annotations[common.RebootNeededAnnotation]; !ok {
 		return nil // Node does not need reboot
 	}
 
@@ -174,18 +188,18 @@ func (c *mongodbController) process(key string) error {
 
 	if unavailable >= maxUnavailable {
 		// TODO(aaron): We might want this case to retry indefinitely. Could create a specific error an check in handleErr()
-		return fmt.Errorf("Too many nodes unvailable (%d/%d). Skipping reboot of %s", unavailable, maxUnavailable, node.Name)
+		return fmt.Errorf("Too many nodes unvailable (%d/%d). Skipping reboot of %s", unavailable, maxUnavailable, pod.Name)
 	}
 
 	// We should not modify the cache object directly, so we make a copy first
-	nodeCopy, err := common.CopyObjToNode(node)
+	podCopy, err := common.CopyObjToNode(pod)
 	if err != nil {
-		return fmt.Errorf("Failed to make copy of node: %v", err)
+		return fmt.Errorf("Failed to make copy of pod: %v", err)
 	}
 
-	glog.Infof("Marking node %s for reboot", node.Name)
-	nodeCopy.Annotations[common.RebootAnnotation] = ""
-	if _, err := c.client.Core().Nodes().Update(nodeCopy); err != nil {
+	glog.Infof("Marking pod %s for reboot", pod.Name)
+	podCopy.Annotations[common.RebootAnnotation] = ""
+	if _, err := c.client.Core().Pods("default").Update(podCopy); err != nil {
 		return fmt.Errorf("Failed to set %s annotation: %v", common.RebootAnnotation, err)
 	}
 	return nil
@@ -215,34 +229,35 @@ func (c *mongodbController) handleErr(err error, key interface{}) {
 }
 
 func (c *mongodbController) unavailableNodeCount() (int, error) {
-	nodes, err := c.nodeLister.List(labels.Everything())
-	if err != nil {
-		return 0, err
-	}
-	var unavailable int
-	for _, n := range nodes {
-		if nodeIsRebooting(n) {
-			unavailable++
-			continue
-		}
-		for _, c := range n.Status.Conditions {
-			if c.Type == v1.NodeReady && c.Status == v1.ConditionFalse {
-				unavailable++
-			}
-		}
-	}
+	// nodes, err := c.nodeLister.List(labels.Everything())
+	// if err != nil {
+	// 	return 0, err
+	// }
+	// var unavailable int
+	// for _, n := range nodes {
+	// 	if nodeIsRebooting(n) {
+	// 		unavailable++
+	// 		continue
+	// 	}
+	// 	for _, c := range n.Status.Conditions {
+	// 		if c.Type == v1.NodeReady && c.Status == v1.ConditionFalse {
+	// 			unavailable++
+	// 		}
+	// 	}
+	// }
+	var unavailable = 10
 	return unavailable, nil
 }
 
-func nodeIsRebooting(n *v1.Node) bool {
+func podIsRebooting(p *v1.Pod) bool {
 	// Check if node is marked for reeboot-in-progress
-	if n.Annotations == nil {
+	if p.Annotations == nil {
 		return false // No annotations - not marked as needing reboot
 	}
-	if _, ok := n.Annotations[common.RebootInProgressAnnotation]; ok {
+	if _, ok := p.Annotations[common.RebootInProgressAnnotation]; ok {
 		return true
 	}
 	// Check if node is already marked for immediate reboot
-	_, ok := n.Annotations[common.RebootAnnotation]
+	_, ok := p.Annotations[common.RebootAnnotation]
 	return ok
 }

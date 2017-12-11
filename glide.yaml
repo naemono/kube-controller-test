@@ -1,4 +1,16 @@
 package: github.com/naemono/kube-controller-test
 import:
+# - package: k8s.io/client-go
+#   version: v4.0.0
+- package: k8s.io/code-generator
+  repo:    git@github.com:kubernetes/code-generator
+  version: kubernetes-1.8.5
+# - package: k8s.io/gengo
+#   repo:    git@github.com:kubernetes/gengo
+#   version: 70ad626ed2d7a483d89d2c4c56364d60b48ee8fc
 - package: k8s.io/client-go
   version: v4.0.0
+- package: k8s.io/apiextensions-apiserver
+  version: release-1.8
+- package: k8s.io/apimachinery
+  version: 1fd2e63a9a370677308a42f24fd40c86438afddf

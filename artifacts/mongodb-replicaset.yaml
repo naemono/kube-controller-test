@@ -1,0 +1,20 @@
+apiVersion: example.com/v1
+kind: MongodbReplicaset
+metadata:
+  name: example-mongodb-replicaset
+spec:
+  daeta-node-replicas: 1
+  arbiter-node-replicas: 1
+  data-disk-size: 20
+  mongodb-image: mongo:3.6.0
+  storage:
+    type: standard
+    storage-class: volume.alpha.kubernetes.io/storage-class
+    storage-class-provisioner: local
+    volume-reclaim-policy: Delete
+  resources:
+    limits:
+      memory: 1024
+      cpu: 0.5
+  admin-password: test
+  admin-username: test

@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: mongodb-controller
-        image: naemono/mongodb-controller:latest
+        image: naemono/mongodb-controller:0.0.1
         imagePullPolicy: IfNotPresent
         command:
         - ./mongodb-controller
